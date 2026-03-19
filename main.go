@@ -5,38 +5,77 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-type SingleFlight struct {
+type Call struct {
 	wg sync.WaitGroup
-	isActive atomic.Bool
 	res string
 	err error
 }
 
-func NewSingleFlight() *SingleFlight {
-	return &SingleFlight {}
+type CallsMap struct {
+	m map[string]*Call
+	mutex sync.Mutex
 }
 
-func (s *SingleFlight) Do(fn func() (string, error)) (string, error) {
-	s.wg.Add(1)
+func NewCallsMap() CallsMap {
+	return CallsMap{
+		m: make(map[string]*Call),
+	}
+}
 
-	go func (){
-		if !s.isActive.Load() {
-			s.isActive.Store(true)
+func (c *CallsMap) GetOrCreate(key string) (*Call, bool) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if call, ok := c.m[key]; ok {
+		return call, true
+	}
+
+	call := &Call{}
+	c.m[key] = call
+
+	return call, false
+}
+
+func (c *CallsMap) Remove(key string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	delete(c.m, key)
+}
+
+type SingleFlight struct {
+	calls CallsMap
+}
+
+func NewSingleFlight() *SingleFlight {
+	return &SingleFlight {
+		calls: NewCallsMap(),
+	}
+}
+
+func (s *SingleFlight) Do(key string, fn func() (string, error)) (string, error) {
+	call, ok := s.calls.GetOrCreate(key)
+
+	if !ok {
+		call.wg.Add(1)
+
+		go func (){
+			defer call.wg.Done()
+
 			fmt.Println("Working")
-			s.res, s.err = fn()
-			s.isActive.Store(false)
-		}
+			call.res, call.err = fn()
+		}()
 
-		s.wg.Done()
-	}()
+		defer func() {
+			s.calls.Remove(key)
+		}()
+	}
 
-	s.wg.Wait()
+	call.wg.Wait()
 
-	return s.res, s.err
+	return call.res, call.err
 }
 
 func main() {
@@ -48,9 +87,8 @@ func main() {
 		wg.Add(1)
 
 		go func() {
-			fmt.Printf("Gorutine n %d started\n", i + 1)
-			res, _ := sf.Do(longRequest)
-			fmt.Println(res)
+			res, _ := sf.Do("123", longRequest)
+			fmt.Printf("Gorutine %d finished with result = %s\n", i + 1, res)
 			wg.Done()
 		}()
 	}
